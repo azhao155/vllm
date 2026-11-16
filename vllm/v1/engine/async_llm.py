@@ -74,6 +74,7 @@ from vllm.v1.metrics.loggers import (
 )
 from vllm.v1.metrics.prometheus import shutdown_prometheus
 from vllm.v1.metrics.stats import IterationStats
+from vllm.yanshu_debug import stamp
 
 logger = init_logger(__name__)
 
@@ -519,6 +520,15 @@ class AsyncLLM(EngineClient):
             request.reasoning_parser_kwargs = reasoning_parser_kwargs
 
         self.input_processor.assign_request_id(request)
+        logger.info(
+            "Yanshu debug here, [S06 EngineCoreRequest] %s | EngineCoreRequest "
+            "ready and its id made unique: external_id=%s internal_id=%s "
+            "prompt_tokens=%d",
+            stamp(),
+            request.external_req_id,
+            request.request_id,
+            len(request.prompt_token_ids or ()),
+        )
 
         # We start the output_handler on the first call to add_request() so
         # we can call __init__ before the event loop, which enables us
@@ -578,6 +588,13 @@ class AsyncLLM(EngineClient):
             self.check_admission(request_id=request.request_id)
 
         # Register locally before the first await so concurrent tasks see this request.
+        logger.info(
+            "Yanshu debug here, [S07 OutputProcessor.add_request] %s | req=%s "
+            "next: register a RequestState (detokenizer + this request's output "
+            "queue) in the API server",
+            stamp(),
+            request.request_id,
+        )
         self.output_processor.add_request(request, prompt, parent_req, index, queue)
 
         # Add the EngineCoreRequest to EngineCore (separate process).
@@ -770,6 +787,12 @@ class AsyncLLM(EngineClient):
         """
         q: RequestOutputCollector | None = None
         try:
+            logger.info(
+                "Yanshu debug here, [S05 AsyncLLM.generate] %s | req=%s the "
+                "generate() body starts; next: add_request()",
+                stamp(),
+                request_id,
+            )
             q = await self.add_request(
                 request_id,
                 prompt,
@@ -798,6 +821,14 @@ class AsyncLLM(EngineClient):
                 # own request cleanup based on finished.
                 assert isinstance(out, RequestOutput)
                 finished = out.finished
+                logger.info(
+                    "Yanshu debug here, [S26 generate() yields] %s | req=%s "
+                    "generate() took a RequestOutput from this request's queue: "
+                    "finished=%s",
+                    stamp(),
+                    request_id,
+                    finished,
+                )
                 if out is not STREAM_FINISHED:
                     yield out
 
@@ -878,6 +909,16 @@ class AsyncLLM(EngineClient):
                 while True:
                     # 1) Pull EngineCoreOutputs from the EngineCore.
                     outputs = await engine_core.get_output_async()
+                    for core_output in outputs.outputs:
+                        logger.info(
+                            "Yanshu debug here, [S23 output_handler] %s | req=%s the "
+                            "output_handler task received an EngineCoreOutput: "
+                            "new_token_ids=%s finish_reason=%s",
+                            stamp(),
+                            core_output.request_id,
+                            core_output.new_token_ids,
+                            core_output.finish_reason,
+                        )
                     num_outputs = len(outputs.outputs)
 
                     iteration_stats = (
@@ -951,6 +992,14 @@ class AsyncLLM(EngineClient):
         """Abort RequestId in OutputProcessor and EngineCore."""
         request_ids = (
             (request_id,) if isinstance(request_id, str) else as_list(request_id)
+        )
+        logger.info(
+            "Yanshu debug here, [S31 AsyncLLM.abort] %s | abort(%s, internal=%s); "
+            "next: drop the request from OutputProcessor, then send ABORT to "
+            "EngineCore",
+            stamp(),
+            list(request_ids),
+            internal,
         )
         all_request_ids = self.output_processor.abort_requests(request_ids, internal)
         await self.engine_core.abort_requests_async(all_request_ids)

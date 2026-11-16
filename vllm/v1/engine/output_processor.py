@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 import torch
 
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     STREAM_FINISHED,
@@ -42,9 +43,12 @@ from vllm.v1.metrics.stats import (
     SchedulerStats,
 )
 from vllm.v1.outputs import SamplingMaskLists
+from vllm.yanshu_debug import short_ids, stamp
 
 if TYPE_CHECKING:
     from vllm.v1.engine.admission_control import SharedAdmissionStats
+
+logger = init_logger(__name__)
 
 # shared empty CPU tensor used as a placeholder pooling output
 EMPTY_CPU_TENSOR = torch.empty(0, device="cpu")
@@ -837,6 +841,14 @@ class OutputProcessor:
                         engine_core_output.new_sampling_mask
                     )
 
+                logger.info(
+                    "Yanshu debug here, [S24 detokenize] %s | req=%s detokenized "
+                    "new_token_ids=%s; text so far: %.140r",
+                    stamp(),
+                    req_id,
+                    new_token_ids,
+                    getattr(req_state.detokenizer, "output_text", ""),
+                )
                 # 3) Compute sample and prompt logprobs for request,
                 # if required.
                 req_state.logprobs_processor.update_from_output(engine_core_output)
@@ -860,6 +872,20 @@ class OutputProcessor:
 
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
+                    if (
+                        isinstance(request_output, RequestOutput)
+                        and request_output.outputs
+                    ):
+                        logger.info(
+                            "Yanshu debug here, [S25 RequestOutput queued] %s | req=%s "
+                            "RequestOutput built; next: put it on this request's "
+                            "queue: finished=%s token_ids=%s text=%.140r",
+                            stamp(),
+                            req_id,
+                            request_output.finished,
+                            short_ids(request_output.outputs[0].token_ids, keep=12),
+                            request_output.outputs[0].text,
+                        )
                     req_state.queue.put(request_output)
                 else:
                     # LLMEngine: return list of RequestOutputs.

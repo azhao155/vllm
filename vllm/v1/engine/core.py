@@ -109,6 +109,7 @@ from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import compute_iteration_details
 from vllm.version import __version__ as VLLM_VERSION
+from vllm.yanshu_debug import describe_step, is_idle_step, stamp
 
 logger = init_logger(__name__)
 
@@ -566,6 +567,12 @@ class EngineCore:
         # TODO: The scheduler doesn't really need to know the
         # specific finish reason, TBD whether we propagate that
         # (i.e. client-aborted vs stop criteria met).
+        logger.info(
+            "Yanshu debug here, [S32 EngineCore.abort_requests] %s | "
+            "abort_requests(%s); next: Scheduler.finish_requests(FINISHED_ABORTED)",
+            stamp(),
+            request_ids,
+        )
         self.scheduler.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
 
     @contextmanager
@@ -675,6 +682,13 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+        if not is_idle_step(scheduler_output):
+            logger.info(
+                "Yanshu debug here, [S13 Scheduler.schedule] %s | schedule() "
+                "returned a SchedulerOutput: %s",
+                stamp(),
+                describe_step(scheduler_output),
+            )
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
@@ -685,12 +699,32 @@ class EngineCore:
             if model_output is None:
                 model_output = self.model_executor.sample_tokens(grammar_output)
 
+        if not is_idle_step(scheduler_output):
+            logger.info(
+                "Yanshu debug here, [S19 model output] %s | the model output is "
+                "back in EngineCore: req_ids=%s sampled_token_ids=%s",
+                stamp(),
+                model_output.req_ids,
+                model_output.sampled_token_ids,
+            )
+
         # Before processing the model output, process any aborts that happened
         # during the model execution.
         self._process_aborts_queue()
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+        for client_outputs in engine_core_outputs.values():
+            for core_output in client_outputs.outputs:
+                logger.info(
+                    "Yanshu debug here, [S20 update_from_output] %s | req=%s "
+                    "Scheduler.update_from_output made an EngineCoreOutput: "
+                    "new_token_ids=%s finish_reason=%s",
+                    stamp(),
+                    core_output.request_id,
+                    core_output.new_token_ids,
+                    core_output.finish_reason,
+                )
         self._attach_iteration_details(engine_core_outputs, iteration_details)
         self._attach_weight_version(engine_core_outputs)
 
@@ -733,6 +767,13 @@ class EngineCore:
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+            if not is_idle_step(scheduler_output):
+                logger.info(
+                    "Yanshu debug here, [S13 Scheduler.schedule] %s | schedule() "
+                    "returned a SchedulerOutput: %s",
+                    stamp(),
+                    describe_step(scheduler_output),
+                )
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
@@ -787,12 +828,32 @@ class EngineCore:
                 exec_model_fut.result()
                 raise RuntimeError("unexpected error")
 
+        if not is_idle_step(scheduler_output):
+            logger.info(
+                "Yanshu debug here, [S19 model output] %s | the model output is "
+                "back in EngineCore: req_ids=%s sampled_token_ids=%s",
+                stamp(),
+                model_output.req_ids,
+                model_output.sampled_token_ids,
+            )
+
         # Before processing the model output, process any aborts that happened
         # during the model execution.
         self._process_aborts_queue()
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+        for client_outputs in engine_core_outputs.values():
+            for core_output in client_outputs.outputs:
+                logger.info(
+                    "Yanshu debug here, [S20 update_from_output] %s | req=%s "
+                    "Scheduler.update_from_output made an EngineCoreOutput: "
+                    "new_token_ids=%s finish_reason=%s",
+                    stamp(),
+                    core_output.request_id,
+                    core_output.new_token_ids,
+                    core_output.finish_reason,
+                )
         self._attach_iteration_details(engine_core_outputs, iteration_details)
         self._attach_weight_version(engine_core_outputs)
 
@@ -1758,6 +1819,13 @@ class EngineCoreProc(EngineCore):
             req, request_wave = request
             if self._reject_add_in_shutdown(req) or self._reject_add_while_paused(req):
                 return
+            logger.info(
+                "Yanshu debug here, [S11 EngineCore.add_request] %s | req=%s the "
+                "busy loop took ADD from input_queue: prompt_tokens=%d",
+                stamp(),
+                req.request_id,
+                req.num_prompt_tokens,
+            )
             self.add_request(req, request_wave)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
@@ -2001,6 +2069,14 @@ class EngineCoreProc(EngineCore):
                     request: Any
                     if request_type == EngineCoreRequestType.ADD:
                         req: EngineCoreRequest = add_request_decoder.decode(data_frames)
+                        logger.info(
+                            "Yanshu debug here, [S09 ZMQ recv ADD] %s | req=%s the "
+                            "input thread read ADD from the ZMQ socket and "
+                            "decoded it: prompt_tokens=%d",
+                            stamp(),
+                            req.request_id,
+                            len(req.prompt_token_ids or ()),
+                        )
                         try:
                             request = self.preprocess_add_request(req)
                         except MultiModalCacheMissError as e:
@@ -2035,6 +2111,24 @@ class EngineCoreProc(EngineCore):
                             # queue to avoid leaking requests. This is ok because
                             # aborting in the scheduler is idempotent.
                             self.aborts_queue.put_nowait(request)
+                            logger.info(
+                                "Yanshu debug here, [S10 input_queue.put] %s | "
+                                "ABORT for %s is on aborts_queue; next: put "
+                                "it on input_queue too",
+                                stamp(),
+                                request,
+                            )
+
+                    if request_type == EngineCoreRequestType.ADD:
+                        logger.info(
+                            "Yanshu debug here, [S10 input_queue.put] %s | req=%s the "
+                            "input thread built the Request (block hashes for "
+                            "prefix caching: %d); next: put it on input_queue "
+                            "for the busy loop",
+                            stamp(),
+                            request[0].request_id,
+                            len(request[0].block_hashes),
+                        )
 
                     # Push to input queue for core busy loop.
                     self.input_queue.put_nowait((request_type, request))
@@ -2095,6 +2189,19 @@ class EngineCoreProc(EngineCore):
                     reclaimed = pending.pop()[1]
                     if len(reuse_buffers) < max_reuse_bufs:
                         reuse_buffers.append(reclaimed)
+
+                for core_output in outputs.outputs:
+                    logger.info(
+                        "Yanshu debug here, [S22 ZMQ send outputs] %s | req=%s the "
+                        "output thread took an EngineCoreOutput from output_queue; "
+                        "next: msgpack-encode and send it on ZMQ to API server "
+                        "client %d: new_token_ids=%s finish_reason=%s",
+                        stamp(),
+                        core_output.request_id,
+                        client_index,
+                        core_output.new_token_ids,
+                        core_output.finish_reason,
+                    )
 
                 buffer = reuse_buffers.pop() if reuse_buffers else bytearray()
                 buffers = encoder.encode_into(outputs, buffer)

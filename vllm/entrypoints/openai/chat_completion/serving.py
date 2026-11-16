@@ -71,6 +71,7 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
+from vllm.yanshu_debug import short_ids, stamp
 
 logger = init_logger(__name__)
 
@@ -338,6 +339,15 @@ class OpenAIServingChat(GenerateBaseServing):
         mm_token_counts: dict[str, int] | None = None
         for i, engine_input in enumerate(engine_inputs):
             prompt_token_ids = self._extract_prompt_components(engine_input).token_ids
+            logger.info(
+                "Yanshu debug here, [S02 render+tokenize] %s | req=%s chat "
+                "template applied and prompt tokenized, in the API server "
+                "process: prompt_tokens=%d first_ids=%s",
+                stamp(),
+                request_id,
+                len(prompt_token_ids or ()),
+                short_ids(prompt_token_ids),
+            )
             mm_token_counts = _get_mm_token_counts(engine_input)
 
             # If we are creating sub requests for multiple prompts, ensure that they
@@ -405,6 +415,17 @@ class OpenAIServingChat(GenerateBaseServing):
                     **self._engine_reasoning_kwargs(
                         request, parser, chat_template_kwargs, prompt_token_ids
                     ),
+                )
+                logger.info(
+                    "Yanshu debug here, [S03 generate() called] %s | req=%s "
+                    "engine_client.generate() returned an async generator; no "
+                    "engine code has run yet. max_tokens=%s temperature=%s "
+                    "output_kind=%s",
+                    stamp(),
+                    sub_request_id,
+                    sampling_params.max_tokens,
+                    sampling_params.temperature,
+                    sampling_params.output_kind.name,
                 )
 
             generators.append(generator)
@@ -499,11 +520,24 @@ class OpenAIServingChat(GenerateBaseServing):
                     data = chunk.model_dump_json(
                         exclude_unset=True, exclude_none=not chunk.choices
                     )
+                logger.info(
+                    "Yanshu debug here, [S27 SSE chunk] %s | req=%s next: yield "
+                    "this SSE chunk to the HTTP response: %.200s",
+                    stamp(),
+                    request_id,
+                    data,
+                )
                 yield f"data: {data}\n\n"
         except Exception as e:
             logger.exception("Error serializing chat completion stream.")
             data = self.create_streaming_error_response(e)
             yield f"data: {data}\n\n"
+        logger.info(
+            "Yanshu debug here, [S28 SSE DONE] %s | req=%s next: yield the final "
+            "'data: [DONE]', which ends the stream",
+            stamp(),
+            request_id,
+        )
         yield "data: [DONE]\n\n"
 
     async def chat_completion_stream_generator_raw(
@@ -1185,6 +1219,15 @@ class OpenAIServingChat(GenerateBaseServing):
                         delta=False,
                     )
 
+        logger.info(
+            "Yanshu debug here, [S29 response built] %s | req=%s non-streaming: "
+            "ChatCompletionResponse built: choices=%d usage=%s first_text=%.140r",
+            stamp(),
+            request_id,
+            len(response.choices),
+            response.usage,
+            response.choices[0].message.content if response.choices else None,
+        )
         return response
 
     def _get_top_logprobs(

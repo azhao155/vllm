@@ -25,6 +25,7 @@ from vllm.entrypoints.serve.utils.api_utils import (
 from vllm.entrypoints.serve.utils.orca_metrics import metrics_header
 from vllm.entrypoints.serve.utils.sse_keep_alive import with_sse_keep_alive
 from vllm.logger import init_logger
+from vllm.yanshu_debug import stamp
 
 logger = init_logger(__name__)
 
@@ -60,6 +61,17 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
     metrics_header_format = raw_request.headers.get(
         ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL, ""
     )
+    logger.info(
+        "Yanshu debug here, [S01 api route] %s | POST /v1/chat/completions "
+        "reached the FastAPI route: X-Request-Id=%s model=%s stream=%s "
+        "max_tokens=%s messages=%d",
+        stamp(),
+        raw_request.headers.get("X-Request-Id"),
+        request.model,
+        request.stream,
+        request.max_completion_tokens or request.max_tokens,
+        len(request.messages),
+    )
     handler = chat(raw_request)
     if handler is None:
         raise NotImplementedError("The model does not support Chat Completions API")
@@ -72,11 +84,22 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
         )
 
     elif isinstance(generator, ChatCompletionResponse):
+        logger.info(
+            "Yanshu debug here, [S30 JSONResponse] %s | non-streaming: the "
+            "route returns a JSONResponse",
+            stamp(),
+        )
         return JSONResponse(
             content=generator.model_dump(),
             headers=metrics_header(metrics_header_format),
         )
 
+    logger.info(
+        "Yanshu debug here, [S04 StreamingResponse] %s | streaming: the route "
+        "returns a StreamingResponse now. Its generator, and so "
+        "AsyncLLM.generate(), runs later, when the response is iterated",
+        stamp(),
+    )
     args = getattr(raw_request.app.state, "args", None)
     keep_alive_interval = getattr(args, "sse_keep_alive_interval", 0)
     return StreamingResponse(

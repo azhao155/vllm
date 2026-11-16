@@ -79,6 +79,7 @@ from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.structured_output.utils import strip_speculative_padding
 from vllm.v1.utils import record_function_or_nullcontext
+from vllm.yanshu_debug import stamp
 
 logger = init_logger(__name__)
 
@@ -2947,6 +2948,15 @@ class Scheduler(SchedulerInterface):
                 request.streaming_queue = deque()
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
+            logger.info(
+                "Yanshu debug here, [S12 Scheduler.add_request] %s | req=%s queued "
+                "with status %s. waiting=%d running=%d",
+                stamp(),
+                request.request_id,
+                request.status.name,
+                len(self.waiting),
+                len(self.running),
+            )
             if self.spec_decode_metrics_level != "none":
                 request.spec_decode_metrics = RequestSpecDecodeMetrics.new(
                     self.num_spec_tokens
@@ -3032,6 +3042,15 @@ class Scheduler(SchedulerInterface):
         self, request: Request, delay_free_blocks: bool = False
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         assert request.is_finished()
+        logger.info(
+            "Yanshu debug here, [S21 Scheduler._free_request] %s | req=%s finished "
+            "with status %s after %d output tokens; next: tell the connectors and "
+            "free its KV blocks (a connector can delay the free)",
+            stamp(),
+            request.request_id,
+            request.status.name,
+            request.num_output_tokens,
+        )
 
         if self.aux_output_connector is not None:
             self.aux_output_connector.request_finished(request)

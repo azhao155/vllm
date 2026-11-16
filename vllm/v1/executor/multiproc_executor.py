@@ -77,6 +77,7 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.worker.worker_base import WorkerWrapperBase
+from vllm.yanshu_debug import first_time, is_idle_step, stamp
 
 logger = init_logger(__name__)
 
@@ -406,6 +407,15 @@ class MultiprocExecutor(Executor):
     def execute_model(  # type: ignore[override]
         self, scheduler_output: SchedulerOutput, non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
+        if not is_idle_step(scheduler_output):
+            logger.info(
+                "Yanshu debug here, [S14 executor RPC] %s | "
+                "MultiprocExecutor.execute_model; next: collective_rpc puts one "
+                "'execute_model' message on the shared-memory broadcast queue, "
+                "read by all %d workers",
+                stamp(),
+                len(self.workers),
+            )
         return self.collective_rpc(
             "execute_model",
             args=(scheduler_output,),
@@ -419,6 +429,14 @@ class MultiprocExecutor(Executor):
     def sample_tokens(  # type: ignore[override]
         self, grammar_output: GrammarOutput | None, non_block: bool = False
     ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
+        logger.info(
+            "Yanshu debug here, [S14 executor RPC] %s | "
+            "MultiprocExecutor.sample_tokens; next: collective_rpc puts one "
+            "'sample_tokens' message on the shared-memory broadcast queue, read "
+            "by all %d workers",
+            stamp(),
+            len(self.workers),
+        )
         return self.collective_rpc(
             "sample_tokens",
             args=(grammar_output,),
@@ -1174,11 +1192,38 @@ class WorkerProc:
 
             watchdog = get_watch_dog()
             watchdog.feed()
+            # The two per-step RPCs only; ranks above 0 log each of them once.
+            log_rpc = (
+                method in ("execute_model", "sample_tokens")
+                and not (method == "execute_model" and args and is_idle_step(args[0]))
+                and (self.rank == 0 or first_time(f"worker rpc {method!r}"))
+            )
+            rpc_start = time.perf_counter()
+            if log_rpc:
+                logger.info(
+                    "Yanshu debug here, [S15 worker RPC start] %s | rank=%d took "
+                    "RPC '%s' from the broadcast queue; next: worker.%s()",
+                    stamp(),
+                    self.rank,
+                    method,
+                    method,
+                )
             output = func(*args, **kwargs)
             # Feed again: the RPC itself may run close to the watchdog
             # timeout, so the pre-call feed can go stale while the result
             # is serialized/enqueued in handle_output().
             watchdog.feed()
+            if log_rpc:
+                logger.info(
+                    "Yanshu debug here, [S18 worker RPC done] %s | rank=%d RPC '%s' "
+                    "returned after %.1f ms: %s sampled_token_ids=%s",
+                    stamp(),
+                    self.rank,
+                    method,
+                    (time.perf_counter() - rpc_start) * 1000,
+                    type(output).__name__,
+                    getattr(output, "sampled_token_ids", None),
+                )
 
             if output_rank is None or self.rank == output_rank:
                 self.handle_output(output)

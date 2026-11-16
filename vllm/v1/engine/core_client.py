@@ -70,6 +70,7 @@ from vllm.v1.fault_tolerance.utils import (
 )
 from vllm.v1.pool.late_interaction import get_late_interaction_engine_index
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
+from vllm.yanshu_debug import stamp
 
 logger = init_logger(__name__)
 
@@ -1338,6 +1339,14 @@ class AsyncMPClient(MPClient):
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         request.client_index = self.client_index
+        logger.info(
+            "Yanshu debug here, [S08 ZMQ send ADD] %s | req=%s next: "
+            "msgpack-encode the EngineCoreRequest and send it as ADD on the ZMQ "
+            "input socket to the EngineCore process (client_index=%d)",
+            stamp(),
+            request.request_id,
+            self.client_index,
+        )
         await self._send_input(EngineCoreRequestType.ADD, request)
         self._ensure_output_queue_task()
 
